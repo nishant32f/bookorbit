@@ -1,4 +1,4 @@
-import { IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsNumber, IsObject, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class SaveProgressDto {
   @IsString()
@@ -24,4 +24,8 @@ export class SaveProgressDto {
   @IsNumber()
   @IsOptional()
   timestamp?: number;
+
+  @IsObject()
+  @IsOptional()
+  metadata?: Record<string, unknown>;
 }

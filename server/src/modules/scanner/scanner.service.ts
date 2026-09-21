@@ -1897,19 +1897,39 @@ export class ScannerService implements OnApplicationBootstrap {
     const reassigned = byPath.bookId !== bookId;
     const sortOrderUnchanged = sortOrder === byPath.sortOrder;
 
-    if (sizeUnchanged && mtimeUnchanged && !reassigned && sortOrderUnchanged) {
+    await waitForStability(fileStat.absolutePath, fileStat.mtime.getTime());
+
+    let fileHash: string;
+    try {
+      fileHash = await computeFileHash(fileStat.absolutePath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'EACCES') {
+        this.logger.debug(
+          `[scanner.process_file] [end] bookId=${bookId} path="${sanitizeLogValue(fileStat.absolutePath)}" action=skip_inaccessible - file no longer accessible`,
+        );
+        return { isNew: false, reassigned: false, changed: false, fileId: byPath.id };
+      }
+      throw err;
+    }
+    const hashChanged = byPath.fileHash !== fileHash;
+
+    if (sizeUnchanged && mtimeUnchanged && !reassigned && sortOrderUnchanged && !hashChanged) {
       return { isNew: false, reassigned: false, changed: false, fileId: byPath.id };
     }
 
-    await waitForStability(fileStat.absolutePath, fileStat.mtime.getTime());
+    if (byPath.fileHash && hashChanged) {
+      await this.scannerRepo.recordHashHistory(byPath.id, byPath.fileHash, 'external_change');
+    }
 
-    if (!sizeUnchanged || !mtimeUnchanged || reassigned) {
+    if (!sizeUnchanged || !mtimeUnchanged || reassigned || hashChanged) {
       await this.scannerRepo.updateBookFile(byPath.id, {
         ...(reassigned && { bookId }),
         libraryFolderId,
         ino: fileStat.ino,
         sizeBytes: fileStat.sizeBytes,
         mtime: fileStat.mtime,
+        fileHash,
         format,
         role,
         sortOrder,
@@ -1930,7 +1950,7 @@ export class ScannerService implements OnApplicationBootstrap {
       ino: fileStat.ino,
       sizeBytes: fileStat.sizeBytes,
       mtime: fileStat.mtime,
-      fileHash: byPath.fileHash,
+      fileHash,
       sortOrder,
     });
     if (fileStat.ino !== 0) {

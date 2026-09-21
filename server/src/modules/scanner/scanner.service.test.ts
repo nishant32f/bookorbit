@@ -94,6 +94,7 @@ function makeRepo(overrides: Record<string, unknown> = {}) {
     markBooksAsMissing: vi.fn().mockResolvedValue(undefined),
     createBookFile: vi.fn().mockResolvedValue(makeBookFile()),
     updateBookFile: vi.fn().mockResolvedValue(makeBookFile()),
+    recordHashHistory: vi.fn().mockResolvedValue(undefined),
     findBookFileByHash: vi.fn().mockResolvedValue(null),
     findBookFileWithContextByIno: vi.fn().mockResolvedValue(null),
     findMissingBookFileWithContextByIno: vi.fn().mockResolvedValue(null),
@@ -763,12 +764,80 @@ describe('file identity resolution', () => {
     expect(repo.createBookFile).not.toHaveBeenCalled();
   });
 
+  it('refreshes the file hash and preserves the previous hash when file content changed', async () => {
+    const oldMtime = new Date('2023-01-01');
+    const newMtime = new Date('2024-06-01');
+    const fileStat = makeFileStat({ mtime: newMtime });
+    mockFingerprint.mockResolvedValue('new-hash');
+
+    const repo = makeRepo({
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([
+        makeBookFile({
+          absolutePath: fileStat.absolutePath,
+          fileHash: 'old-hash',
+          mtime: oldMtime,
+        }),
+      ]),
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Author/Book', status: 'present' }]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [fileStat])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(repo.recordHashHistory).toHaveBeenCalledWith(1, 'old-hash', 'external_change');
+    expect(repo.updateBookFile).toHaveBeenCalledWith(1, expect.objectContaining({ fileHash: 'new-hash', mtime: newMtime }));
+  });
+
+  it('backfills a stale file hash even when size and mtime are unchanged', async () => {
+    const mtime = new Date('2024-01-01');
+    const fileStat = makeFileStat({ mtime });
+    mockFingerprint.mockResolvedValue('current-hash');
+
+    const repo = makeRepo({
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([
+        makeBookFile({
+          absolutePath: fileStat.absolutePath,
+          fileHash: 'stale-hash',
+          mtime,
+          sizeBytes: fileStat.sizeBytes,
+        }),
+      ]),
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Author/Book', status: 'present' }]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [fileStat])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(repo.recordHashHistory).toHaveBeenCalledWith(1, 'stale-hash', 'external_change');
+    expect(repo.updateBookFile).toHaveBeenCalledWith(1, expect.objectContaining({ fileHash: 'current-hash' }));
+  });
+
   it('does not update when path matches and file is unchanged', async () => {
     const mtime = new Date('2024-01-01');
     const fileStat = makeFileStat({ mtime });
 
     const repo = makeRepo({
-      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([makeBookFile({ mtime, sizeBytes: fileStat.sizeBytes })]),
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([makeBookFile({ fileHash: 'hash-abc', mtime, sizeBytes: fileStat.sizeBytes })]),
       findBooksByLibraryFolder: vi
         .fn()
         .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Author/Book', status: 'present' }]),

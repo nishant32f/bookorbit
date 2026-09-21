@@ -206,6 +206,19 @@ describe('ScannerRepository', () => {
     expect(db.insert).toHaveBeenCalledTimes(1);
   });
 
+  it('records prior file hashes without duplicating history rows', async () => {
+    const { repo, chains } = makeRepo();
+
+    await repo.recordHashHistory(300, 'old-hash', 'external_change');
+
+    expect(chains.insert[0].mocks.values).toHaveBeenCalledWith({
+      bookFileId: 300,
+      fileHash: 'old-hash',
+      reason: 'external_change',
+    });
+    expect(chains.insert[0].mocks.onConflictDoNothing).toHaveBeenCalledTimes(1);
+  });
+
   it('handles missing/present transitions and moving books across libraries', async () => {
     const { repo, queues, db } = makeRepo();
     queues.select.push([

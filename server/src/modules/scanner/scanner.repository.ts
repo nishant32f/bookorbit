@@ -10,6 +10,7 @@ import {
   bookFiles,
   bookGenres,
   bookMetadata,
+  bookFileHashHistory,
   books,
   genres,
   koreaderDeviceProgress,
@@ -230,6 +231,10 @@ export class ScannerRepository {
       .where(eq(bookFiles.id, id))
       .returning();
     return file;
+  }
+
+  async recordHashHistory(bookFileId: number, fileHash: string, reason: 'external_change' | 'file_write' | 'rescan') {
+    await this.db.insert(bookFileHashHistory).values({ bookFileId, fileHash, reason }).onConflictDoNothing();
   }
 
   async findBookFileByAbsolutePath(absolutePath: string, libraryId?: number) {
