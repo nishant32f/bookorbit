@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, ForbiddenException, Get, Headers, Param, ParseIntPipe, Patch, Post, Put, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 
 import { Permission } from '@bookorbit/types';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -8,6 +9,9 @@ import type { RequestUser } from '../../common/types/request-user';
 import { KoreaderAuthGuard } from './koreader-auth.guard';
 import { KoreaderService } from './koreader.service';
 import { CreateKoreaderUserDto, SaveProgressDto, TestConnectionDto, UpdateKoreaderUserDto } from './dto';
+
+const ONE_MINUTE_MS = 60_000;
+const KOREADER_SYNC_REQUESTS_PER_MINUTE = 2_000;
 
 @Controller('koreader')
 export class KoreaderController {
@@ -30,6 +34,7 @@ export class KoreaderController {
 
   @Public()
   @UseGuards(KoreaderAuthGuard)
+  @Throttle({ default: { limit: KOREADER_SYNC_REQUESTS_PER_MINUTE, ttl: ONE_MINUTE_MS } })
   @Put('syncs/progress')
   async saveProgress(@CurrentUser() user: RequestUser, @Body() dto: SaveProgressDto) {
     return this.koreaderService.saveProgress(user.id, dto);
@@ -37,6 +42,7 @@ export class KoreaderController {
 
   @Public()
   @UseGuards(KoreaderAuthGuard)
+  @Throttle({ default: { limit: KOREADER_SYNC_REQUESTS_PER_MINUTE, ttl: ONE_MINUTE_MS } })
   @Get('syncs/progress/:document')
   async getProgress(@CurrentUser() user: RequestUser, @Param('document') document: string) {
     const progress = await this.koreaderService.getProgress(user.id, document);
