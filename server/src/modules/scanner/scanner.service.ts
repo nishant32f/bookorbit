@@ -15,6 +15,7 @@ import { readdir, stat } from 'fs/promises';
 
 import { classifyFile, DEFAULT_FORMAT_PRIORITY, FileRole, isAudioFormat } from './lib/classify';
 import { computeFileHash } from './lib/hash';
+import { isSameMovedFile } from './lib/move-identity';
 import { waitForStability } from './lib/stability';
 import {
   BookCandidate,
@@ -1572,7 +1573,9 @@ export class ScannerService implements OnApplicationBootstrap {
       if (byPath) candidateOwnedBookIds.add(byPath.bookId);
       if (file.ino !== 0) {
         const byIno = fileByIno.get(file.ino);
-        if (byIno) candidateOwnedBookIds.add(byIno.bookId);
+        if (byIno && (await isSameMovedFile(file, { ...byIno, fileHash: fileByPath.get(byIno.absolutePath)?.fileHash ?? null }))) {
+          candidateOwnedBookIds.add(byIno.bookId);
+        }
       }
     }
 
@@ -1676,7 +1679,7 @@ export class ScannerService implements OnApplicationBootstrap {
     for (const file of contentFiles) {
       if (file.ino === 0) continue;
       const byIno = fileByIno.get(file.ino);
-      if (!byIno || byIno.absolutePath === file.absolutePath) continue;
+      if (!byIno || !(await isSameMovedFile(file, { ...byIno, fileHash: fileByPath.get(byIno.absolutePath)?.fileHash ?? null }))) continue;
       sourceBookId = byIno.bookId;
       break;
     }
@@ -1779,7 +1782,7 @@ export class ScannerService implements OnApplicationBootstrap {
     for (const file of contentFiles) {
       if (file.ino === 0) continue;
       const byIno = await this.scannerRepo.findMissingBookFileWithContextByIno(file.ino);
-      if (!byIno) continue;
+      if (!byIno || !(await isSameMovedFile(file, byIno.file))) continue;
       sourceBookId = byIno.file.bookId;
       break;
     }
@@ -1788,8 +1791,7 @@ export class ScannerService implements OnApplicationBootstrap {
       for (const file of contentFiles) {
         if (file.ino === 0) continue;
         const byIno = await this.scannerRepo.findBookFileWithContextByIno(file.ino);
-        if (!byIno || byIno.file.absolutePath === file.absolutePath) continue;
-        if (byIno.libraryId === libraryId) continue;
+        if (!byIno || byIno.libraryId === libraryId || !(await isSameMovedFile(file, byIno.file))) continue;
         const previousPathStat = await stat(byIno.file.absolutePath).catch(() => null);
         if (previousPathStat?.isFile()) continue;
         sourceBookId = byIno.file.bookId;
@@ -1892,6 +1894,7 @@ export class ScannerService implements OnApplicationBootstrap {
     fileByIno: Map<number, FileByInoEntry>,
     counts: ScanCounts,
   ): Promise<ProcessedFileResult & { fileId: number }> {
+    const inoUnchanged = fileStat.ino === byPath.ino;
     const sizeUnchanged = fileStat.sizeBytes === byPath.sizeBytes;
     const mtimeUnchanged = fileStat.mtime.getTime() === byPath.mtime?.getTime();
     const reassigned = byPath.bookId !== bookId;
@@ -1914,7 +1917,7 @@ export class ScannerService implements OnApplicationBootstrap {
     }
     const hashChanged = byPath.fileHash !== fileHash;
 
-    if (sizeUnchanged && mtimeUnchanged && !reassigned && sortOrderUnchanged && !hashChanged) {
+    if (inoUnchanged && sizeUnchanged && mtimeUnchanged && !reassigned && sortOrderUnchanged && !hashChanged) {
       return { isNew: false, reassigned: false, changed: false, fileId: byPath.id };
     }
 
@@ -1922,7 +1925,7 @@ export class ScannerService implements OnApplicationBootstrap {
       await this.scannerRepo.recordHashHistory(byPath.id, byPath.fileHash, 'external_change');
     }
 
-    if (!sizeUnchanged || !mtimeUnchanged || reassigned || hashChanged) {
+    if (!inoUnchanged || !sizeUnchanged || !mtimeUnchanged || reassigned || hashChanged) {
       await this.scannerRepo.updateBookFile(byPath.id, {
         ...(reassigned && { bookId }),
         libraryFolderId,
@@ -1977,7 +1980,7 @@ export class ScannerService implements OnApplicationBootstrap {
     counts: ScanCounts,
   ): Promise<(ProcessedFileResult & { fileId: number }) | null> {
     const byIno = fileByIno.get(fileStat.ino);
-    if (!byIno) return null;
+    if (!byIno || !(await isSameMovedFile(fileStat, { ...byIno, fileHash: fileByPath.get(byIno.absolutePath)?.fileHash ?? null }))) return null;
 
     const oldAbsolutePath = byIno.absolutePath;
     const sizeUnchanged = fileStat.sizeBytes === byIno.sizeBytes;
@@ -2034,7 +2037,8 @@ export class ScannerService implements OnApplicationBootstrap {
     if (
       !globalByIno ||
       globalByIno.file.absolutePath === fileStat.absolutePath ||
-      !(globalByIno.file.bookId === bookId || globalByIno.bookStatus === 'missing')
+      !(globalByIno.file.bookId === bookId || globalByIno.bookStatus === 'missing') ||
+      !(await isSameMovedFile(fileStat, globalByIno.file))
     ) {
       return null;
     }

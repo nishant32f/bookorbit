@@ -1,3 +1,5 @@
+vi.mock('./lib/hash');
+import { computeFileHash } from './lib/hash';
 import { FileEventProcessorService } from './file-event-processor.service';
 import type { Mocked, MockedFunction } from 'vitest';
 import { ScannerRepository } from './scanner.repository';
@@ -72,6 +74,8 @@ function makeFileStat(overrides: Partial<{ ino: number | bigint; size: number | 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockStat.mockReset();
+  vi.mocked(computeFileHash).mockResolvedValue('move-hash');
   vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
   vi.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
@@ -275,7 +279,7 @@ describe('handleUnlinkDir', () => {
 
 describe('handleCreate — file', () => {
   it('returns noop when stat fails (path no longer exists)', async () => {
-    mockStat.mockRejectedValue(new Error('ENOENT'));
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
 
     const result = await makeService().handleCreate('/books/Author/ghost.epub');
 
@@ -466,7 +470,9 @@ describe('handleCreate — directory (folder restoration)', () => {
   });
 
   it('returns noop when files for missing books no longer exist on disk', async () => {
-    mockStat.mockResolvedValueOnce(makeFileStat({ isDirectory: true, isFile: false })).mockRejectedValueOnce(new Error('ENOENT'));
+    mockStat
+      .mockResolvedValueOnce(makeFileStat({ isDirectory: true, isFile: false }))
+      .mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
 
     mockRepo.findMissingBooksByFolderPath.mockResolvedValue([{ id: 80, libraryId: 7, libraryFolderId: 30, folderPath: '/books/gone' } as any]);
     mockRepo.findBookFilesByBookId.mockResolvedValue([
@@ -483,14 +489,39 @@ describe('handleCreate — directory (folder restoration)', () => {
 // ── handleCreate — move detection (inode-based) ─────────────────────────────
 
 describe('handleCreate — move detection', () => {
-  it('detects a moved file via inode match and updates paths', async () => {
-    const fileStat = makeFileStat({ ino: 4000, size: 70000 });
-    // First call: stat for the new path; second call: stat for the old path (should not exist)
-    mockStat.mockResolvedValueOnce(fileStat).mockRejectedValueOnce(new Error('ENOENT'));
+  it('does not restore an unrelated book when a watcher event reuses its inode', async () => {
+    mockStat.mockResolvedValueOnce(makeFileStat({ ino: 404 })).mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     mockRepo.findBookFileByAbsolutePath.mockResolvedValue(null);
     mockRepo.findMissingBookByFolderPath.mockResolvedValue(null);
     mockRepo.findBookFileWithContextByIno.mockResolvedValue({
-      file: { id: 50, bookId: 30, absolutePath: '/books/OldAuthor/book.epub' },
+      file: { id: 249, bookId: 249, absolutePath: '/books/AI.epub', sizeBytes: 12345, mtime: new Date('2024-01-01'), fileHash: 'old-book-hash' },
+      libraryId: 2,
+      folderPath: '/books/AI.epub',
+      libraryFolderPath: '/books',
+      bookStatus: 'missing',
+    } as any);
+    const result = await makeService().handleCreate('/books/Guitar.epub');
+    expect(result).toEqual({ type: 'noop' });
+    expect(mockRepo.updateBookFile).not.toHaveBeenCalled();
+    expect(mockRepo.updateBookFolderPath).not.toHaveBeenCalled();
+    expect(mockRepo.markBooksAsPresent).not.toHaveBeenCalled();
+  });
+
+  it('detects a moved file via inode match and updates paths', async () => {
+    const fileStat = makeFileStat({ ino: 4000, size: 70000 });
+    // First call: stat for the new path; second call: stat for the old path (should not exist)
+    mockStat.mockResolvedValueOnce(fileStat).mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    mockRepo.findBookFileByAbsolutePath.mockResolvedValue(null);
+    mockRepo.findMissingBookByFolderPath.mockResolvedValue(null);
+    mockRepo.findBookFileWithContextByIno.mockResolvedValue({
+      file: {
+        id: 50,
+        bookId: 30,
+        absolutePath: '/books/OldAuthor/book.epub',
+        sizeBytes: 70000,
+        mtime: new Date('2024-01-01'),
+        fileHash: 'move-hash',
+      },
       libraryId: 2,
       folderPath: '/books/OldAuthor',
       libraryFolderPath: '/books',
@@ -530,11 +561,11 @@ describe('handleCreate — move detection', () => {
   it('does not update folderPath when folder did not change', async () => {
     const fileStat = makeFileStat({ ino: 4000, size: 70000 });
     // First call: stat for the new path; second call: stat for the old path (should not exist)
-    mockStat.mockResolvedValueOnce(fileStat).mockRejectedValueOnce(new Error('ENOENT'));
+    mockStat.mockResolvedValueOnce(fileStat).mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     mockRepo.findBookFileByAbsolutePath.mockResolvedValue(null);
     mockRepo.findMissingBookByFolderPath.mockResolvedValue(null);
     mockRepo.findBookFileWithContextByIno.mockResolvedValue({
-      file: { id: 50, bookId: 30, absolutePath: '/books/Author/old.epub' },
+      file: { id: 50, bookId: 30, absolutePath: '/books/Author/old.epub', sizeBytes: 70000, mtime: new Date('2024-01-01'), fileHash: 'move-hash' },
       libraryId: 2,
       folderPath: '/books/Author',
       libraryFolderPath: '/books',
@@ -550,11 +581,11 @@ describe('handleCreate — move detection', () => {
   it('handles root-level file rename (folderPath equals old absolutePath)', async () => {
     const fileStat = makeFileStat({ ino: 5000 });
     // First call: stat for the new path; second call: stat for the old path (should not exist)
-    mockStat.mockResolvedValueOnce(fileStat).mockRejectedValueOnce(new Error('ENOENT'));
+    mockStat.mockResolvedValueOnce(fileStat).mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     mockRepo.findBookFileByAbsolutePath.mockResolvedValue(null);
     mockRepo.findMissingBookByFolderPath.mockResolvedValue(null);
     mockRepo.findBookFileWithContextByIno.mockResolvedValue({
-      file: { id: 60, bookId: 40, absolutePath: '/books/old.epub' },
+      file: { id: 60, bookId: 40, absolutePath: '/books/old.epub', sizeBytes: 12345, mtime: new Date('2024-01-01'), fileHash: 'move-hash' },
       libraryId: 3,
       folderPath: '/books/old.epub',
       libraryFolderPath: '/books',
@@ -587,12 +618,19 @@ describe('handleCreate — directory move detection', () => {
     mockStat
       .mockResolvedValueOnce(makeFileStat({ isDirectory: true, isFile: false }))
       .mockResolvedValueOnce(makeFileStat({ ino: 6000, size: 90000 }))
-      .mockRejectedValueOnce(new Error('ENOENT')); // old path no longer exists
+      .mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' })); // old path no longer exists
 
     mockRepo.findMissingBooksByFolderPath.mockResolvedValue([]);
     mockReaddir.mockResolvedValue([{ isFile: () => true, name: 'book.epub', parentPath: '/books/NewAuthor' }] as any);
     mockRepo.findBookFileWithContextByIno.mockResolvedValue({
-      file: { id: 70, bookId: 50, absolutePath: '/books/OldAuthor/book.epub' },
+      file: {
+        id: 70,
+        bookId: 50,
+        absolutePath: '/books/OldAuthor/book.epub',
+        sizeBytes: 90000,
+        mtime: new Date('2024-01-01'),
+        fileHash: 'move-hash',
+      },
       libraryId: 4,
       folderPath: '/books/OldAuthor',
       libraryFolderPath: '/books',
@@ -648,7 +686,7 @@ describe('reconcileMissingBooks', () => {
     mockRepo.findBookFilesByBookId.mockResolvedValue([
       { id: 301, absolutePath: '/books/still-gone/book.epub', bookId: 51, role: 'content', format: 'epub', sizeBytes: 1000 } as any,
     ]);
-    mockStat.mockRejectedValue(new Error('ENOENT'));
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
 
     const results = await makeService().reconcileMissingBooks([2]);
 

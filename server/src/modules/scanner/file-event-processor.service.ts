@@ -6,6 +6,7 @@ import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 import { classifyFile, DEFAULT_FORMAT_PRIORITY } from './lib/classify';
 import { clampIno } from './lib/walk';
+import { isSameMovedFile } from './lib/move-identity';
 import { ScannerRepository } from './scanner.repository';
 
 export type FileEventResult =
@@ -270,18 +271,7 @@ export class FileEventProcessorService {
     if (!match || match.file.absolutePath === newAbsolutePath) return { type: 'noop' };
 
     const { file, libraryId: rowLibraryId, folderPath: oldFolderPath, libraryFolderPath } = match;
-
-    // Partial move guard - for multi-file books, verify the old file is
-    // actually gone before reassigning. During a folder move, multiple events fire
-    // and some files may not have been unlinked yet.
-    const oldFileStillExists = await stat(file.absolutePath).then(
-      (s) => s.isFile(),
-      () => false,
-    );
-    if (oldFileStillExists) {
-      this.logger.log(
-        `[scanner.file_event.move] [end] libraryId=${rowLibraryId} bookId=${file.bookId} from="${sanitizeLogValue(file.absolutePath)}" to="${sanitizeLogValue(newAbsolutePath)}" action=skip_old_still_exists - old file still exists, deferring to scan`,
-      );
+    if (!(await isSameMovedFile({ absolutePath: newAbsolutePath, sizeBytes: Number(fileStat.size), mtime: fileStat.mtime }, file))) {
       return { type: 'noop' };
     }
 
