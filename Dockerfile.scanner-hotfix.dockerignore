@@ -1,0 +1,10 @@
+**
+!server/
+!server/dist/
+!server/dist/modules/
+!server/dist/modules/scanner/
+!server/dist/modules/scanner/**
+!server/src/
+!server/src/modules/
+!server/src/modules/scanner/
+!server/src/modules/scanner/**
