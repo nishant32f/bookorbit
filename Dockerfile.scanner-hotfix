@@ -1,0 +1,10 @@
+ARG BASE_IMAGE=sha256:4ba0c89b677d16ea4d030098065658c65930584e1ae40181e7f2272d26564855
+FROM ${BASE_IMAGE}
+ARG APP_VERSION
+ENV APP_VERSION=${APP_VERSION}
+COPY --chown=node:node server/dist/modules/scanner/scanner.service.js* /app/dist/modules/scanner/
+COPY --chown=node:node server/dist/modules/scanner/file-event-processor.service.js* /app/dist/modules/scanner/
+COPY --chown=node:node server/dist/modules/scanner/lib/move-identity.js* /app/dist/modules/scanner/lib/
+COPY --chown=node:node server/src/modules/scanner/scanner.service*.ts /app/src/modules/scanner/
+COPY --chown=node:node server/src/modules/scanner/file-event-processor.service*.ts /app/src/modules/scanner/
+COPY --chown=node:node server/src/modules/scanner/lib/move-identity*.ts /app/src/modules/scanner/lib/

@@ -858,6 +858,55 @@ describe('file identity resolution', () => {
     expect(repo.createBookFile).not.toHaveBeenCalled();
   });
 
+  it('refreshes stale inode identity at an unchanged tracked path after a mount restart', async () => {
+    const file = makeFileStat({ ino: 9009 });
+    const repo = makeRepo({
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Author/Book', status: 'present' }]),
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([makeBookFile({ ino: 1001, fileHash: 'hash-abc' })]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [file])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+    expect(repo.updateBookFile).toHaveBeenCalledWith(1, expect.objectContaining({ ino: 9009, fileHash: 'hash-abc' }));
+    expect(repo.createBook).not.toHaveBeenCalled();
+  });
+
+  it('does not steal a missing book when an unrelated file reuses its inode', async () => {
+    const file = makeFileStat({ absolutePath: '/library/Guitar.epub', relPath: 'Guitar.epub', ino: 404, sizeBytes: 4096 });
+    const repo = makeRepo({
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 249, libraryId: 1, libraryFolderId: 1, folderPath: '/library/AI.epub', status: 'missing' }]),
+      findBookFilesByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([makeBookFile({ id: 249, bookId: 249, absolutePath: '/library/AI.epub', ino: 404, sizeBytes: 2048 })]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate(file.absolutePath, [file])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+    expect(repo.failScanJob).not.toHaveBeenCalled();
+    expect(repo.updateBookFolderPath).not.toHaveBeenCalled();
+    expect(repo.createBook).toHaveBeenCalled();
+    expect(repo.updateBookFile).not.toHaveBeenCalledWith(249, expect.anything());
+  });
+
   it('updates path when inode matches a known file at a different path (renamed file)', async () => {
     const fileStat = makeFileStat({ absolutePath: '/library/Author/Book/renamed.epub', relPath: 'Author/Book/renamed.epub', ino: 9999 });
 
@@ -874,6 +923,8 @@ describe('file identity resolution', () => {
       dirMtimes: new Map(),
     });
 
+    mockFingerprint.mockResolvedValue('abc123');
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     const done = awaitScan(repo);
     const { service } = makeService(repo);
     await service.startScan(1, 'manual');
@@ -911,6 +962,8 @@ describe('file identity resolution', () => {
       dirMtimes: new Map(),
     });
 
+    mockFingerprint.mockResolvedValue('rename-hash');
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     const done = awaitScan(repo);
     const { service } = makeService(repo);
     await service.startScan(1, 'manual');
@@ -1550,6 +1603,37 @@ describe('missing book restoration', () => {
 });
 
 describe('cross-library transfer', () => {
+  it.each(['missing', 'present'])('does not transfer a %s source book on a reused inode', async (status) => {
+    const destination = makeFileStat({ absolutePath: '/dest/Guitar.epub', relPath: 'Guitar.epub', ino: 404 });
+    const source = {
+      file: makeBookFile({ bookId: 249, absolutePath: '/source/AI.epub', ino: 404 }),
+      libraryId: 1,
+      bookStatus: status,
+      folderPath: '/source/AI.epub',
+      libraryFolderPath: '/source',
+    };
+    const repo = makeRepo({
+      findLibraryFolders: vi.fn().mockResolvedValue([{ id: 20, path: '/dest', libraryId: 2 }]),
+      findMissingBookFileWithContextByIno: vi.fn().mockResolvedValue(status === 'missing' ? source : null),
+      findBookFileWithContextByIno: vi.fn().mockResolvedValue(source),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate(destination.absolutePath, [destination])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(2, 'manual');
+    await done;
+    expect(repo.failScanJob).not.toHaveBeenCalled();
+    expect(repo.moveBookToLibrary).not.toHaveBeenCalled();
+    expect(repo.createBook).toHaveBeenCalled();
+    expect(repo.updateBookFile).not.toHaveBeenCalledWith(1, expect.anything());
+  });
+
   it('transfers a missing source book into the destination library via inode match', async () => {
     const destinationFile = makeFileStat({
       absolutePath: '/dest/Inbox/book.epub',
@@ -1592,6 +1676,8 @@ describe('cross-library transfer', () => {
       dirMtimes: new Map(),
     });
 
+    mockFingerprint.mockResolvedValue('transfer-hash');
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     const done = awaitScan(repo);
     const { service } = makeService(repo);
     await service.startScan(2, 'manual');
@@ -1650,6 +1736,8 @@ describe('cross-library transfer', () => {
     });
     mockStat.mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
 
+    mockFingerprint.mockResolvedValue('transfer-hash');
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     const done = awaitScan(repo);
     const { service } = makeService(repo);
     await service.startScan(2, 'manual');
@@ -1957,6 +2045,8 @@ describe('virtual sibling drain', () => {
       dirMtimes: new Map(),
     });
 
+    mockFingerprint.mockResolvedValue('abc123');
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     const done = awaitScan(repo);
     const { service } = makeService(repo);
     await service.startScan(1, 'manual');
