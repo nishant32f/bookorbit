@@ -3,7 +3,7 @@ import { readdir, stat } from 'fs/promises';
 import type { BigIntStats } from 'fs';
 import { dirname, join, relative } from 'path';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
-import { pathsReferToSameEntry } from '../../common/utils/path-identity.utils';
+import { isSameMovedFile } from './lib/move-identity';
 import { selectPrimaryFile } from '../../common/utils/primary-file-selection.utils';
 
 import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
@@ -405,20 +405,7 @@ export class FileEventProcessorService {
 
     const { file, libraryId: rowLibraryId, folderPath: oldFolderPath, libraryFolderPath } = match;
 
-    // Partial move guard - for multi-file books, verify the old file is
-    // actually gone before reassigning. During a folder move, multiple events fire
-    // and some files may not have been unlinked yet.
-    let oldFileStillExists = await stat(file.absolutePath).then(
-      (s) => s.isFile(),
-      () => false,
-    );
-    if (oldFileStillExists && (await pathsReferToSameEntry(file.absolutePath, newAbsolutePath))) {
-      oldFileStillExists = false;
-    }
-    if (oldFileStillExists) {
-      this.logger.log(
-        `[scanner.file_event.move] [end] libraryId=${rowLibraryId} bookId=${file.bookId} from="${sanitizeLogValue(file.absolutePath)}" to="${sanitizeLogValue(newAbsolutePath)}" action=skip_old_still_exists - old file still exists, deferring to scan`,
-      );
+    if (!(await isSameMovedFile({ absolutePath: newAbsolutePath, ...this.statToFileInfo(fileStat) }, file))) {
       return { type: 'noop' };
     }
 

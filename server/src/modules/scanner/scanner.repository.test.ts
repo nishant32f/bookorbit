@@ -1,3 +1,4 @@
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { ScannerRepository } from './scanner.repository';
 
 type QueryKind = 'select' | 'insert' | 'update' | 'delete';
@@ -68,6 +69,34 @@ function makeRepo() {
 }
 
 describe('ScannerRepository', () => {
+  it('keeps hash history and existing progress associations in the file update transaction', async () => {
+    const { repo, queues, chains, db } = makeRepo();
+    queues.select.push([{ fileHash: 'previous-hash' }]);
+    queues.update.push([]);
+    queues.update.push([]);
+    queues.update.push([{ id: 300, bookId: 42, fileHash: 'current-hash' }]);
+
+    await expect(repo.updateBookFile(300, { fileHash: 'current-hash' })).resolves.toEqual({
+      id: 300,
+      bookId: 42,
+      fileHash: 'current-hash',
+    });
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(chains.select[0].mocks.for).toHaveBeenCalledWith('update');
+    expect(db.execute).toHaveBeenCalledTimes(1);
+    const historyQuery = new PgDialect().sqlToQuery(db.execute.mock.calls[0][0]);
+    expect(historyQuery.params).toEqual(expect.arrayContaining(['previous-hash', 'rescan', 300]));
+    expect(chains.update[0].mocks.set).toHaveBeenCalledWith(expect.objectContaining({ cfi: null, koreaderProgress: null }));
+    const clearedFields = chains.update[0].mocks.set.mock.calls[0][0];
+    expect(clearedFields).not.toHaveProperty('bookId');
+    expect(clearedFields).not.toHaveProperty('bookFileId');
+    expect(clearedFields).not.toHaveProperty('percentage');
+    expect(chains.update[2].mocks.set).toHaveBeenCalledWith(expect.objectContaining({ fileHash: 'current-hash' }));
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(db.delete).not.toHaveBeenCalled();
+  });
+
   it('handles scan job lifecycle writes', async () => {
     const { repo, queues, db, chains } = makeRepo();
     queues.insert.push([{ id: 501, libraryId: 3, triggeredBy: 'manual' }]);

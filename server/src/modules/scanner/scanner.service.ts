@@ -6,6 +6,7 @@ import { mapWithConcurrency } from '../../common/utils/batch.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { audioBookPercentageAt, compareBookFilePaths, remapAudioBookPosition, type AudioTrackSpan } from '../../common/utils/audio-track-order.utils';
 import { compareAudioTracks } from '../../common/utils/book-media.utils';
+import { isSameMovedFile } from './lib/move-identity';
 import { pathsReferToSameEntry } from '../../common/utils/path-identity.utils';
 import { selectPrimaryFile } from '../../common/utils/primary-file-selection.utils';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
@@ -2348,7 +2349,9 @@ export class ScannerService implements OnApplicationBootstrap {
       if (byPath) candidateOwnedBookIds.add(byPath.bookId);
       if (file.ino !== 0n) {
         const byIno = fileByIno.get(file.ino);
-        if (byIno) candidateOwnedBookIds.add(byIno.bookId);
+        if (byIno && (await isSameMovedFile(file, { ...byIno, fileHash: fileByPath.get(byIno.absolutePath)?.fileHash ?? null }))) {
+          candidateOwnedBookIds.add(byIno.bookId);
+        }
       }
     }
 
@@ -2487,7 +2490,7 @@ export class ScannerService implements OnApplicationBootstrap {
     for (const file of contentFiles) {
       if (file.ino === 0n) continue;
       const byIno = fileByIno.get(file.ino);
-      if (!byIno || byIno.absolutePath === file.absolutePath) continue;
+      if (!byIno || !(await isSameMovedFile(file, { ...byIno, fileHash: fileByPath.get(byIno.absolutePath)?.fileHash ?? null }))) continue;
       sourceBookId = byIno.bookId;
       break;
     }
@@ -2620,7 +2623,7 @@ export class ScannerService implements OnApplicationBootstrap {
     for (const file of contentFiles) {
       if (file.ino === 0n) continue;
       const byIno = await this.scannerRepo.findMissingBookFileWithContextByIno(file.ino);
-      if (!byIno || (await this.pathExistsAsDistinctEntry(byIno.file.absolutePath, file.absolutePath))) continue;
+      if (!byIno || !(await isSameMovedFile(file, byIno.file))) continue;
       sourceBookId = byIno.file.bookId;
       sourceLibraryId = byIno.libraryId;
       break;
@@ -2630,8 +2633,7 @@ export class ScannerService implements OnApplicationBootstrap {
       for (const file of contentFiles) {
         if (file.ino === 0n) continue;
         const byIno = await this.scannerRepo.findBookFileWithContextByIno(file.ino);
-        if (!byIno || byIno.file.absolutePath === file.absolutePath) continue;
-        if (await this.fileExistsAsDistinctEntry(byIno.file.absolutePath, file.absolutePath)) continue;
+        if (!byIno || !(await isSameMovedFile(file, byIno.file))) continue;
         sourceBookId = byIno.file.bookId;
         sourceLibraryId = byIno.libraryId;
         break;
@@ -2765,7 +2767,20 @@ export class ScannerService implements OnApplicationBootstrap {
     let mediaOverlayAvailable = byPath.mediaOverlayAvailable;
     let mediaOverlayCheckedAt = byPath.mediaOverlayCheckedAt;
 
-    if (sizeUnchanged && mtimeUnchanged && inoUnchanged && relPathUnchanged && !reassigned && sortOrderUnchanged && roleUnchanged) {
+    await waitForStability(fileStat.absolutePath, fileStat.mtime.getTime());
+    let fileHash: string;
+    try {
+      fileHash = await computeFileHash(fileStat.absolutePath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'EACCES') {
+        return { isNew: false, reassigned: false, changed: false, fileId: byPath.id };
+      }
+      throw err;
+    }
+    const hashChanged = fileHash !== byPath.fileHash;
+
+    if (sizeUnchanged && mtimeUnchanged && inoUnchanged && relPathUnchanged && !reassigned && sortOrderUnchanged && roleUnchanged && !hashChanged) {
       if (format?.toLowerCase() === 'epub' && byPath.mediaOverlayCheckedAt == null) {
         const mediaOverlayFields = await this.inspectMediaOverlayFields(fileStat.absolutePath, format);
         await this.scannerRepo.updateBookFile(byPath.id, mediaOverlayFields);
@@ -2778,17 +2793,14 @@ export class ScannerService implements OnApplicationBootstrap {
       return { isNew: false, reassigned: false, changed: false, fileId: byPath.id };
     }
 
-    await waitForStability(fileStat.absolutePath, fileStat.mtime.getTime());
-
     const mediaOverlayFields: Partial<EpubMediaOverlayColumnFields> =
-      !sizeUnchanged || !mtimeUnchanged || reassigned ? await this.inspectMediaOverlayFields(fileStat.absolutePath, format) : {};
+      !sizeUnchanged || !mtimeUnchanged || hashChanged || reassigned ? await this.inspectMediaOverlayFields(fileStat.absolutePath, format) : {};
     if ('mediaOverlayCheckedAt' in mediaOverlayFields) {
       mediaOverlayAvailable = mediaOverlayFields.mediaOverlayAvailable === true;
       mediaOverlayCheckedAt = mediaOverlayFields.mediaOverlayCheckedAt ?? null;
     }
 
-    const fileHash = !sizeUnchanged || !mtimeUnchanged ? await computeFileHash(fileStat.absolutePath) : byPath.fileHash;
-    if (!sizeUnchanged || !mtimeUnchanged || !inoUnchanged || !relPathUnchanged || reassigned || !roleUnchanged) {
+    if (hashChanged || !sizeUnchanged || !mtimeUnchanged || !inoUnchanged || !relPathUnchanged || reassigned || !roleUnchanged) {
       await this.scannerRepo.updateBookFile(byPath.id, {
         fileHash,
         ...(reassigned && { bookId }),
@@ -2837,7 +2849,7 @@ export class ScannerService implements OnApplicationBootstrap {
     return {
       isNew: false,
       reassigned,
-      changed: !sizeUnchanged || !mtimeUnchanged || !roleUnchanged,
+      changed: hashChanged || !sizeUnchanged || !mtimeUnchanged || !roleUnchanged,
       pathChanged: !relPathUnchanged,
       fileId: byPath.id,
       previousBookId,
@@ -2859,7 +2871,7 @@ export class ScannerService implements OnApplicationBootstrap {
     if (!byIno) return null;
 
     const oldAbsolutePath = byIno.absolutePath;
-    if (await this.pathExistsAsDistinctEntry(oldAbsolutePath, fileStat.absolutePath)) return null;
+    if (!(await isSameMovedFile(fileStat, { ...byIno, fileHash: fileByPath.get(oldAbsolutePath)?.fileHash ?? null }))) return null;
     const sizeUnchanged = fileStat.sizeBytes === byIno.sizeBytes;
     const mtimeUnchanged = fileStat.mtime.getTime() === byIno.mtime?.getTime();
     const mediaOverlayFields = await this.inspectMediaOverlayFields(fileStat.absolutePath, format);
@@ -2930,7 +2942,7 @@ export class ScannerService implements OnApplicationBootstrap {
     ) {
       return null;
     }
-    if (await this.pathExistsAsDistinctEntry(globalByIno.file.absolutePath, fileStat.absolutePath)) return null;
+    if (!(await isSameMovedFile(fileStat, globalByIno.file))) return null;
 
     const oldAbsolutePath = globalByIno.file.absolutePath;
     const sizeUnchanged = fileStat.sizeBytes === globalByIno.file.sizeBytes;

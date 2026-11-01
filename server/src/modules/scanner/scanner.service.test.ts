@@ -69,7 +69,7 @@ function makeBookFile(overrides: Record<string, unknown> = {}) {
     ino: 1001n,
     sizeBytes: 1024,
     mtime: new Date('2024-01-01'),
-    fileHash: 'abc123',
+    fileHash: 'hash-abc',
     format: 'epub',
     role: 'content',
     sortOrder: 0,
@@ -1135,6 +1135,96 @@ describe('zero-byte primary files', () => {
 // ── File identity resolution ──────────────────────────────────────────────────
 
 describe('file identity resolution', () => {
+  it.each(['missing', 'present'])('does not transfer a %s source book on a reused inode', async (status) => {
+    const destination = makeFileStat({ absolutePath: '/dest/Guitar.epub', relPath: 'Guitar.epub', ino: 404n });
+    const source = {
+      file: makeBookFile({ bookId: 249, absolutePath: '/source/AI.epub', ino: 404n, fileHash: 'old-book-hash' }),
+      libraryId: 1,
+      bookStatus: status,
+      folderPath: '/source/AI.epub',
+      libraryFolderPath: '/source',
+    };
+    const repo = makeRepo({
+      findLibraryFolders: vi.fn().mockResolvedValue([{ id: 20, path: '/dest', libraryId: 2 }]),
+      findMissingBookFileWithContextByIno: vi.fn().mockResolvedValue(status === 'missing' ? source : null),
+      findBookFileWithContextByIno: vi.fn().mockResolvedValue(source),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate(destination.absolutePath, [destination])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(2, 'manual');
+    await done;
+    expect(repo.failScanJob).not.toHaveBeenCalled();
+    expect(repo.moveBookToLibrary).not.toHaveBeenCalled();
+    expect(repo.createBook).toHaveBeenCalled();
+    expect(repo.updateBookFile).not.toHaveBeenCalledWith(1, expect.anything());
+  });
+  it('does not steal a missing book when an unrelated file reuses its inode', async () => {
+    const file = makeFileStat({ absolutePath: '/library/Guitar.epub', relPath: 'Guitar.epub', ino: 404n, sizeBytes: 4096 });
+    const repo = makeRepo({
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 249, libraryId: 1, libraryFolderId: 1, folderPath: '/library/AI.epub', status: 'missing' }]),
+      findBookFilesByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([makeBookFile({ id: 249, bookId: 249, absolutePath: '/library/AI.epub', ino: 404n, sizeBytes: 2048 })]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate(file.absolutePath, [file])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+    expect(repo.failScanJob).not.toHaveBeenCalled();
+    expect(repo.updateBookFolderPath).not.toHaveBeenCalled();
+    expect(repo.createBook).toHaveBeenCalled();
+    expect(repo.updateBookFile).not.toHaveBeenCalledWith(249, expect.anything());
+  });
+  it('backfills a stale file hash even when size and mtime are unchanged', async () => {
+    const mtime = new Date('2024-01-01');
+    const fileStat = makeFileStat({ mtime });
+    mockFingerprint.mockResolvedValue('current-hash');
+
+    const repo = makeRepo({
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([
+        makeBookFile({
+          absolutePath: fileStat.absolutePath,
+          fileHash: 'stale-hash',
+          mtime,
+          sizeBytes: fileStat.sizeBytes,
+        }),
+      ]),
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Author/Book', status: 'present' }]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [fileStat])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(repo.updateBookFile).toHaveBeenCalledWith(1, expect.objectContaining({ fileHash: 'current-hash' }));
+    expect(repo.createBook).not.toHaveBeenCalled();
+    expect(repo.createBookFile).not.toHaveBeenCalled();
+  });
   it('updates the book file record when path matches but mtime changed', async () => {
     const oldMtime = new Date('2023-01-01');
     const newMtime = new Date('2024-06-01');
@@ -1425,6 +1515,7 @@ describe('file identity resolution', () => {
     });
     mockStat.mockRejectedValue(Object.assign(new Error('not found'), { code: 'ENOENT' }));
 
+    mockFingerprint.mockResolvedValue('rename-hash');
     const done = awaitScan(repo);
     const { service } = makeService(repo);
     await service.startScan(1, 'manual');
@@ -2792,6 +2883,7 @@ describe('cross-library transfer', () => {
     });
     mockStat.mockRejectedValue(Object.assign(new Error('not found'), { code: 'ENOENT' }));
 
+    mockFingerprint.mockResolvedValue('transfer-hash');
     const done = awaitScan(repo);
     const { service, notificationService } = makeService(repo);
     service.bufferBooksUnavailableNotification(1, [42]);
@@ -2854,6 +2946,7 @@ describe('cross-library transfer', () => {
     });
     mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
 
+    mockFingerprint.mockResolvedValue('transfer-hash');
     const done = awaitScan(repo);
     const { service } = makeService(repo);
     await service.startScan(2, 'manual');
@@ -2916,6 +3009,7 @@ describe('cross-library transfer', () => {
       return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     });
 
+    mockFingerprint.mockResolvedValue('transfer-hash');
     const done = awaitScan(repo);
     const { service } = makeService(repo);
     await service.startScan(2, 'manual');
@@ -3036,6 +3130,7 @@ describe('cross-library transfer', () => {
     });
     mockStat.mockRejectedValue(Object.assign(new Error('not found'), { code: 'ENOENT' }));
 
+    mockFingerprint.mockResolvedValue('transfer-hash');
     const done = awaitScan(repo);
     const { service } = makeService(repo);
     await service.startScan(2, 'manual');
@@ -3269,6 +3364,7 @@ describe('virtual sibling drain', () => {
       dirMtimes: new Map(),
     });
 
+    mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     const done = awaitScan(repo);
     const { service } = makeService(repo);
     await service.startScan(1, 'manual');
@@ -3819,7 +3915,7 @@ describe('book_per_file mode — scanBookFolder', () => {
           ino: 3001n,
           sizeBytes: 1024,
           mtime: new Date('2024-01-01'),
-          fileHash: null,
+          fileHash: 'hash-abc',
         },
         libraryId: 1,
         bookStatus: 'present',

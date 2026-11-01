@@ -1,3 +1,4 @@
+import { THROTTLER_LIMIT, THROTTLER_TTL } from '@nestjs/throttler/dist/throttler.constants';
 import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -234,4 +235,10 @@ describe('KoreaderController', () => {
     });
     expect(koreaderService.testConnection).toHaveBeenCalledWith(7, 'reader', 'secret1');
   });
+});
+
+it.each(['saveProgress', 'getProgress'] as const)('allows authenticated sync bursts for %s', (method) => {
+  const handler = KoreaderController.prototype[method];
+  expect(Reflect.getMetadata(THROTTLER_LIMIT + 'default', handler)).toBe(2000);
+  expect(Reflect.getMetadata(THROTTLER_TTL + 'default', handler)).toBe(60_000);
 });

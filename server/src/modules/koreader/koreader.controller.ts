@@ -14,6 +14,7 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { FastifyReply } from 'fastify';
 
 import { Permission } from '@bookorbit/types';
@@ -40,6 +41,9 @@ import {
   UpdateKoreaderUserDto,
 } from './dto';
 
+const ONE_MINUTE_MS = 60_000;
+const KOREADER_SYNC_REQUESTS_PER_MINUTE = 2_000;
+
 @Controller('koreader')
 export class KoreaderController {
   constructor(
@@ -65,6 +69,7 @@ export class KoreaderController {
 
   @Public()
   @UseGuards(KoreaderAuthGuard)
+  @Throttle({ default: { limit: KOREADER_SYNC_REQUESTS_PER_MINUTE, ttl: ONE_MINUTE_MS } })
   @Put('syncs/progress')
   async saveProgress(@CurrentUser() user: RequestUser, @Body() dto: KoreaderSaveProgressDto) {
     return this.koreaderService.saveProgress(user, dto);
@@ -72,6 +77,7 @@ export class KoreaderController {
 
   @Public()
   @UseGuards(KoreaderAuthGuard)
+  @Throttle({ default: { limit: KOREADER_SYNC_REQUESTS_PER_MINUTE, ttl: ONE_MINUTE_MS } })
   @Get('syncs/progress/:document')
   async getProgress(@CurrentUser() user: RequestUser, @Param('document') document: string) {
     const progress = await this.koreaderService.getProgress(user.id, document);
